@@ -43,6 +43,8 @@
 #include <asm/page.h>
 #include <linux/task_work.h>
 #include <uapi/linux/ublk_cmd.h>
+#include <linux/filter.h>
+#include <linux/bpf.h>
 
 #define UBLK_MINORS		(1U << MINORBITS)
 
@@ -187,10 +189,32 @@ static DEFINE_MUTEX(ublk_ctl_mutex);
 
 static struct miscdevice ublk_misc;
 
+BPF_CALL_4(ublk_bpf_read_req, struct request *, rq, u32, offset,
+	   void *, to, u32, len)
+{
+	trace_printk("lege: ublk & epbf\n");
+	return 0;
+};
+
+const struct bpf_func_proto ublk_bpf_read_req_proto = {
+	.func = ublk_bpf_read_req,
+	.gpl_only = false,
+	.ret_type = RET_INTEGER,
+	.arg1_type = ARG_PTR_TO_CTX,
+	.arg2_type = ARG_ANYTHING,
+	.arg3_type = ARG_PTR_TO_UNINIT_MEM,
+	.arg4_type = ARG_CONST_SIZE,
+};
+
 static const struct bpf_func_proto *
 ublk_bpf_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 {
-	return bpf_base_func_proto(func_id);
+	switch (func_id) {
+	case BPF_FUNC_ublk_read_req:
+		return prog->aux->sleepable ? &ublk_bpf_read_req_proto : NULL;
+	default:
+		return bpf_base_func_proto(func_id);
+	}
 }
 
 static bool ublk_bpf_is_valid_access(int off, int size,
