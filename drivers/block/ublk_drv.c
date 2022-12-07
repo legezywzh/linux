@@ -43,6 +43,8 @@
 #include <asm/page.h>
 #include <linux/task_work.h>
 #include <uapi/linux/ublk_cmd.h>
+#include <linux/filter.h>
+#include <linux/bpf.h>
 
 #define UBLK_MINORS		(1U << MINORBITS)
 
@@ -186,6 +188,27 @@ static wait_queue_head_t ublk_idr_wq;	/* wait until one idr is freed */
 static DEFINE_MUTEX(ublk_ctl_mutex);
 
 static struct miscdevice ublk_misc;
+
+static const struct bpf_func_proto *
+ublk_bpf_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
+{
+	return bpf_base_func_proto(func_id);
+}
+
+static bool ublk_bpf_is_valid_access(int off, int size,
+			enum bpf_access_type type,
+			const struct bpf_prog *prog,
+			struct bpf_insn_access_aux *info)
+{
+	return false;
+}
+
+const struct bpf_prog_ops bpf_ublk_prog_ops = {};
+
+const struct bpf_verifier_ops bpf_ublk_verifier_ops = {
+	.get_func_proto		= ublk_bpf_func_proto,
+	.is_valid_access	= ublk_bpf_is_valid_access,
+};
 
 static void ublk_dev_param_basic_apply(struct ublk_device *ub)
 {
