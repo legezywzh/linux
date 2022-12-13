@@ -36,6 +36,7 @@
 #include <linux/sched/mm.h>
 #include <linux/uaccess.h>
 #include <linux/cdev.h>
+#include <uapi/linux/io_uring.h>
 #include <linux/io_uring.h>
 #include <linux/blk-mq.h>
 #include <linux/delay.h>
@@ -163,6 +164,9 @@ struct ublk_device {
 	unsigned int		nr_queues_ready;
 	atomic_t		nr_aborted_queues;
 
+	struct bpf_prog *prog;
+	struct bpf_prog *bpf_io_redirect_prog;
+
 	/*
 	 * Our ubq->daemon may be killed without any notification, so
 	 * monitor each queue's daemon periodically
@@ -189,18 +193,33 @@ static DEFINE_MUTEX(ublk_ctl_mutex);
 
 static struct miscdevice ublk_misc;
 
-BPF_CALL_4(ublk_bpf_read_req, struct request *, rq, u32, offset,
+BPF_CALL_3(bpf_ublk_queue_sqe, struct io_uring_sqe *, sqe, u32, sqe_len, u32, fd)
+{
+	io_uring_submit_sqe(fd, sqe, sqe_len);
+	return 0;
+}
+
+BPF_CALL_4(bpf_ublk_read_req, struct request *, rq, u32, offset,
 	   void *, to, u32, len)
 {
 	trace_printk("lege: ublk & epbf\n");
 	return 0;
+}
+
+const struct bpf_func_proto ublk_bpf_queue_sqe_proto = {
+	.func = bpf_ublk_queue_sqe,
+	.gpl_only = false,
+	.ret_type = RET_INTEGER,
+	.arg1_type = ARG_ANYTHING,
+	.arg2_type = ARG_ANYTHING,
+	.arg3_type = ARG_ANYTHING,
 };
 
 const struct bpf_func_proto ublk_bpf_read_req_proto = {
-	.func = ublk_bpf_read_req,
+	.func = bpf_ublk_read_req,
 	.gpl_only = false,
 	.ret_type = RET_INTEGER,
-	.arg1_type = ARG_PTR_TO_CTX,
+	.arg1_type = ARG_ANYTHING,
 	.arg2_type = ARG_ANYTHING,
 	.arg3_type = ARG_PTR_TO_UNINIT_MEM,
 	.arg4_type = ARG_CONST_SIZE,
@@ -211,8 +230,14 @@ ublk_bpf_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 {
 	switch (func_id) {
 	case BPF_FUNC_ublk_read_req:
-		return prog->aux->sleepable ? &ublk_bpf_read_req_proto : NULL;
+		//return prog->aux->sleepable ? &ublk_bpf_read_req_proto : NULL;
+		return &ublk_bpf_read_req_proto;
+	case BPF_FUNC_ublk_queue_sqe:
+		//return prog->aux->sleepable ? &ublk_bpf_read_req_proto : NULL;
+		printk(KERN_ERR "lege xxx 1 %px\n", ublk_bpf_queue_sqe_proto.func);
+		return &ublk_bpf_queue_sqe_proto;
 	default:
+		printk(KERN_ERR "lege xxx 2\n");
 		return bpf_base_func_proto(func_id);
 	}
 }
@@ -222,7 +247,16 @@ static bool ublk_bpf_is_valid_access(int off, int size,
 			const struct bpf_prog *prog,
 			struct bpf_insn_access_aux *info)
 {
-	return false;
+	if (off < 0 || off >= sizeof(struct ublk_bpf_ctx)) {
+		printk(KERN_ERR "lege %d\n", __LINE__);
+		return false;
+	}
+	if (off % size != 0) {
+		printk(KERN_ERR "lege %d\n", __LINE__);
+		return false;
+	}
+
+	return true;
 }
 
 const struct bpf_prog_ops bpf_ublk_prog_ops = {};
@@ -882,12 +916,75 @@ static void ublk_queue_cmd(struct ublk_queue *ubq, struct request *rq)
 	}
 }
 
+struct ublk_bpf_io_redirect_ctx {
+	struct ublk_device *ub;
+	struct callback_head work;
+};
+
+static void ublk_bpf_io_redirect_fn(struct callback_head *work)
+{
+	struct ublk_bpf_io_redirect_ctx *ctx = container_of(work,
+			struct ublk_bpf_io_redirect_ctx, work);
+	struct ublk_device *ub = ctx->ub;
+	u32 ret;
+	struct ublk_bpf_ctx ublk_ctx;
+	ublk_ctx.t_val = 88888888;
+
+	printk(KERN_ERR "%s %d\n", __func__, __LINE__);
+	WARN_ON_ONCE(!ub->bpf_io_redirect_prog);
+	if (ub->bpf_io_redirect_prog) {
+                rcu_read_lock();
+                ret = bpf_prog_run_pin_on_cpu(ub->bpf_io_redirect_prog, &ublk_ctx);
+                rcu_read_unlock();
+		printk(KERN_ERR "%s %d call func\n", __func__, __LINE__);
+	}
+
+	kfree(ctx);
+}
+
+static inline void ublk_run_bpf_prog(struct ublk_queue *ubq)
+{
+	struct ublk_device *ub = ubq->dev;
+	struct bpf_prog *prog = ub->prog;
+	struct ublk_bpf_ctx ublk_ctx;
+	u32 ret;
+
+	if (!prog)
+		return;
+
+	printk(KERN_ERR "run bpf prog\n");
+	ublk_ctx.t_val = 666666;
+	if (!prog->aux->sleepable) {
+                rcu_read_lock();
+                ret = bpf_prog_run_pin_on_cpu(prog, &ublk_ctx);
+                rcu_read_unlock();
+        } else {
+                ret = bpf_prog_run_pin_on_cpu(prog, &ublk_ctx);
+        }
+
+	if (1) {
+		struct ublk_bpf_io_redirect_ctx *ctx;
+
+		printk(KERN_ERR "lege xxx ret: %u\n", ret);
+		ctx = kmalloc(sizeof(struct ublk_bpf_io_redirect_ctx), GFP_KERNEL);
+		ctx->ub = ub;
+		init_task_work(&ctx->work, ublk_bpf_io_redirect_fn);
+		if (task_work_add(ubq->ubq_daemon, &ctx->work, TWA_SIGNAL_NO_IPI))
+			kfree(ctx);
+	} else {
+		printk(KERN_ERR "lege ret: %u\n", ret);
+	}
+}
+
 static blk_status_t ublk_queue_rq(struct blk_mq_hw_ctx *hctx,
 		const struct blk_mq_queue_data *bd)
 {
 	struct ublk_queue *ubq = hctx->driver_data;
 	struct request *rq = bd->rq;
 	blk_status_t res;
+
+	/* Currently just for test. */
+	ublk_run_bpf_prog(ubq);
 
 	/* fill iod to slot in io cmd buffer */
 	res = ublk_setup_iod(ubq, rq);
@@ -2031,6 +2128,58 @@ static int ublk_ctrl_end_recovery(struct io_uring_cmd *cmd)
 	return ret;
 }
 
+static int ublk_ctrl_reg_bpf_prog(struct io_uring_cmd *cmd)
+{
+	struct ublksrv_ctrl_cmd *header = (struct ublksrv_ctrl_cmd *)cmd->cmd;
+	struct ublk_device *ub;
+	struct bpf_prog *prog;
+	int ret = 0;
+
+	printk(KERN_ERR "%d\n", __LINE__);
+	ub = ublk_get_device_from_id(header->dev_id);
+	if (!ub)
+		return -EINVAL;
+
+	mutex_lock(&ub->mutex);
+	prog = bpf_prog_get_type(header->data[0], BPF_PROG_TYPE_UBLK);
+ 	if (IS_ERR(prog)) {
+		ret = PTR_ERR(prog);
+		printk(KERN_ERR "%d %d %llu\n", __LINE__, ret, header->data[0]);
+		goto out_unlock;
+	}
+	ub->prog = prog;
+
+	prog = bpf_prog_get_type(header->data[1], BPF_PROG_TYPE_UBLK);
+ 	if (IS_ERR(prog)) {
+		ret = PTR_ERR(prog);
+		printk(KERN_ERR "%d %d %llu\n", __LINE__, ret, header->data[1]);
+		goto out_unlock;
+	}
+	ub->bpf_io_redirect_prog = prog;
+
+out_unlock:
+	mutex_unlock(&ub->mutex);
+	ublk_put_device(ub);
+	return ret;
+}
+
+static int ublk_ctrl_unreg_bpf_prog(struct io_uring_cmd *cmd)
+{
+	struct ublksrv_ctrl_cmd *header = (struct ublksrv_ctrl_cmd *)cmd->cmd;
+	struct ublk_device *ub;
+
+	ub = ublk_get_device_from_id(header->dev_id);
+	if (!ub)
+		return -EINVAL;
+
+	mutex_lock(&ub->mutex);
+	bpf_prog_put(ub->prog);
+	ub->prog = NULL;
+	mutex_unlock(&ub->mutex);
+	ublk_put_device(ub);
+	return 0;
+}
+
 static int ublk_ctrl_uring_cmd(struct io_uring_cmd *cmd,
 		unsigned int issue_flags)
 {
@@ -2077,6 +2226,12 @@ static int ublk_ctrl_uring_cmd(struct io_uring_cmd *cmd,
 		break;
 	case UBLK_CMD_END_USER_RECOVERY:
 		ret = ublk_ctrl_end_recovery(cmd);
+		break;
+	case UBLK_CMD_REG_BPF_PROG:
+		ret = ublk_ctrl_reg_bpf_prog(cmd);
+		break;
+	case UBLK_CMD_UNREG_BPF_PROG:
+		ret = ublk_ctrl_unreg_bpf_prog(cmd);
 		break;
 	default:
 		break;

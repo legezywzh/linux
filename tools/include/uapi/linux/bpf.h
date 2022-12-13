@@ -978,6 +978,7 @@ enum bpf_prog_type {
 	BPF_PROG_TYPE_LSM,
 	BPF_PROG_TYPE_SK_LOOKUP,
 	BPF_PROG_TYPE_SYSCALL, /* a program that can execute syscalls */
+	BPF_PROG_TYPE_UBLK,
 };
 
 enum bpf_attach_type {
@@ -5435,6 +5436,28 @@ union bpf_attr {
  *		**-E2BIG** if user-space has tried to publish a sample which is
  *		larger than the size of the ring buffer, or which cannot fit
  *		within a struct bpf_dynptr.
+ *
+ * u64 bpf_ublk_read_req(void)
+ *	Description
+ *		A nonsettable system-wide clock derived from wall-clock time but
+ *		ignoring leap seconds.  This clock does not experience
+ *		discontinuities and backwards jumps caused by NTP inserting leap
+ *		seconds as CLOCK_REALTIME does.
+ *
+ *		See: **clock_gettime**\ (**CLOCK_TAI**)
+ *	Return
+ *		Current *ktime*.
+ *
+ * u64 bpf_ublk_queue_sqe(void)
+ *	Description
+ *		A nonsettable system-wide clock derived from wall-clock time but
+ *		ignoring leap seconds.  This clock does not experience
+ *		discontinuities and backwards jumps caused by NTP inserting leap
+ *		seconds as CLOCK_REALTIME does.
+ *
+ *		See: **clock_gettime**\ (**CLOCK_TAI**)
+ *	Return
+ *		Current *ktime*.
  */
 #define __BPF_FUNC_MAPPER(FN)		\
 	FN(unspec),			\
@@ -5647,6 +5670,8 @@ union bpf_attr {
 	FN(tcp_raw_check_syncookie_ipv6),	\
 	FN(ktime_get_tai_ns),		\
 	FN(user_ringbuf_drain),		\
+	FN(ublk_read_req),		\
+	FN(ublk_queue_sqe),		\
 	/* */
 
 /* integer value in 'imm' field of BPF_CALL instruction selects which helper

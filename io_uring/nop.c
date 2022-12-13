@@ -21,5 +21,6 @@ int io_nop_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 int io_nop(struct io_kiocb *req, unsigned int issue_flags)
 {
 	io_req_set_res(req, 0, 0);
+	printk(KERN_ERR "lege %s %d\n", __func__, __LINE__);
 	return IOU_OK;
 }

@@ -3149,6 +3149,53 @@ static int io_get_ext_arg(unsigned flags, const void __user *argp, size_t *argsz
 	return 0;
 }
 
+int io_uring_submit_sqe(int fd, const struct io_uring_sqe *sqe, u32 sqe_len)
+{
+	struct io_kiocb *req;
+	struct fd f;
+	int ret;
+	struct io_ring_ctx *ctx;
+
+	f = fdget(fd);
+	if (unlikely(!f.file))
+		return -EBADF;
+
+	ret = -EOPNOTSUPP;
+	if (unlikely(!io_is_uring_fops(f.file))) {
+		ret = -EBADF;
+		goto out;
+	}
+	ctx = f.file->private_data;
+
+	/*
+	if (sqe_len != sizeof(struct io_uring_sqe))
+		return -EINVAL;
+	*/
+
+	req = io_alloc_req(ctx);
+	if (unlikely(!req)) {
+		ret = -ENOMEM;
+		goto out;
+	}
+	if (!percpu_ref_tryget_many(&ctx->refs, 1)) {
+		kmem_cache_free(req_cachep, req);
+		ret = -EAGAIN;
+		goto out;
+	}
+	percpu_counter_add(&current->io_uring->inflight, 1);
+	refcount_add(1, &current->usage);
+
+	/* returns number of submitted SQEs or an error */
+	ret = !io_submit_sqe(ctx, req, sqe);
+	fdput(f);
+	return ret;
+
+out:
+	fdput(f);
+	return ret;
+}
+EXPORT_SYMBOL(io_uring_submit_sqe);
+
 SYSCALL_DEFINE6(io_uring_enter, unsigned int, fd, u32, to_submit,
 		u32, min_complete, u32, flags, const void __user *, argp,
 		size_t, argsz)

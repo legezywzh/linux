@@ -6532,6 +6532,20 @@ static bool check_arg_pair_ok(const struct bpf_func_proto *fn)
 	 * to be paired, so make sure there's no buggy
 	 * helper function specification.
 	 */
+	bool a, b, c, d, e, f;
+
+	a = arg_type_is_mem_size(fn->arg1_type);
+	b = check_args_pair_invalid(fn, 0);
+	c = check_args_pair_invalid(fn, 1);
+	d = check_args_pair_invalid(fn, 2);
+	e = check_args_pair_invalid(fn, 3);
+	f = check_args_pair_invalid(fn, 4);
+
+	if (a || b || c|| d || e || f) {
+		printk(KERN_ERR "wangxiaoguang %d %d %d %d %d %d\n", a, b, c, d, e, f);
+		return false;
+	}
+	/*
 	if (arg_type_is_mem_size(fn->arg1_type) ||
 	    check_args_pair_invalid(fn, 0) ||
 	    check_args_pair_invalid(fn, 1) ||
@@ -6539,7 +6553,7 @@ static bool check_arg_pair_ok(const struct bpf_func_proto *fn)
 	    check_args_pair_invalid(fn, 3) ||
 	    check_args_pair_invalid(fn, 4))
 		return false;
-
+	*/
 	return true;
 }
 
@@ -6563,9 +6577,13 @@ static bool check_btf_id_ok(const struct bpf_func_proto *fn)
 
 static int check_func_proto(const struct bpf_func_proto *fn, int func_id)
 {
-	return check_raw_mode_ok(fn) &&
-	       check_arg_pair_ok(fn) &&
-	       check_btf_id_ok(fn) ? 0 : -EINVAL;
+	bool a, b, c;
+
+	a = check_raw_mode_ok(fn);
+	b = check_arg_pair_ok(fn);
+	c = check_btf_id_ok(fn);
+	printk(KERN_ERR "wangxiaoguang %d %d %d\n", a, b, c);
+	return a && b && c ? 0 : -EINVAL;
 }
 
 /* Packet data might have moved, any old PTR_TO_PACKET[_META,_END]
@@ -7286,7 +7304,7 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 	/* With LD_ABS/IND some JITs save/restore skb from r1. */
 	changes_data = bpf_helper_changes_pkt_data(fn->func);
 	if (changes_data && fn->arg1_type != ARG_PTR_TO_CTX) {
-		verbose(env, "kernel subsystem misconfigured func %s#%d: r1 != ctx\n",
+		verbose(env, "lege kernel subsystem misconfigured func %s#%d: r1 != ctx\n",
 			func_id_name(func_id), func_id);
 		return -EINVAL;
 	}
@@ -7296,7 +7314,7 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 
 	err = check_func_proto(fn, func_id);
 	if (err) {
-		verbose(env, "kernel subsystem misconfigured func %s#%d\n",
+		verbose(env, "zy kernel subsystem misconfigured func %s#%d\n",
 			func_id_name(func_id), func_id);
 		return err;
 	}
@@ -14399,7 +14417,7 @@ patch_call_imm:
 		 */
 		if (!fn->func) {
 			verbose(env,
-				"kernel subsystem misconfigured func %s#%d\n",
+				"wzh kernel subsystem misconfigured func %s#%d\n",
 				func_id_name(insn->imm), insn->imm);
 			return -EFAULT;
 		}

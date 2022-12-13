@@ -5649,6 +5649,7 @@ union bpf_attr {
 	FN(ktime_get_tai_ns),		\
 	FN(user_ringbuf_drain),		\
 	FN(ublk_read_req),		\
+	FN(ublk_queue_sqe),		\
 	/* */
 
 /* integer value in 'imm' field of BPF_CALL instruction selects which helper
