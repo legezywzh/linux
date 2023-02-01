@@ -1306,6 +1306,20 @@ int io_sqe_buffers_register(struct io_ring_ctx *ctx, void __user *arg,
 	return ret;
 }
 
+int io_import_fixed_kbuf(int ddir, struct iov_iter *iter,
+			   struct io_mapped_kbuf *kbuf,
+			   u64 offset, size_t len)
+{
+	if (WARN_ON_ONCE(!kbuf))
+		return -EFAULT;
+	if (offset >= kbuf->count)
+		return -EFAULT;
+
+	iov_iter_bvec(iter, ddir, kbuf->bvec, kbuf->nr_bvecs, offset + len);
+	iov_iter_advance(iter, offset);
+	return 0;
+}
+
 int io_import_fixed(int ddir, struct iov_iter *iter,
 			   struct io_mapped_ubuf *imu,
 			   u64 buf_addr, size_t len)

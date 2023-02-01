@@ -62,6 +62,7 @@
 struct ublk_rq_data {
 	struct llist_node node;
 	struct callback_head work;
+	struct io_mapped_kbuf *kbuf;
 };
 
 struct ublk_uring_cmd_pdu {
@@ -164,8 +165,8 @@ struct ublk_device {
 	unsigned int		nr_queues_ready;
 	atomic_t		nr_aborted_queues;
 
-	struct bpf_prog *prog;
-	struct bpf_prog *bpf_io_redirect_prog;
+	struct bpf_prog *io_prep_prog;
+	struct bpf_prog *io_submit_prog;
 
 	/*
 	 * Our ubq->daemon may be killed without any notification, so
@@ -193,16 +194,33 @@ static DEFINE_MUTEX(ublk_ctl_mutex);
 
 static struct miscdevice ublk_misc;
 
-BPF_CALL_3(bpf_ublk_queue_sqe, struct io_uring_sqe *, sqe, u32, sqe_len, u32, fd)
+struct ublk_io_bpf_ctx {
+	struct ublk_bpf_ctx ctx;
+	struct ublk_device *ub;
+	struct callback_head work;
+};
+
+BPF_CALL_4(bpf_ublk_queue_sqe, struct ublk_io_bpf_ctx *, bpf_ctx,
+	   struct io_uring_sqe *, sqe, u32, sqe_len, u32, fd)
 {
-	io_uring_submit_sqe(fd, sqe, sqe_len);
+	struct request *rq;
+	struct ublk_rq_data *data;
+	struct io_mapped_kbuf *kbuf;
+	u16 q_id = bpf_ctx->ctx.q_id;
+	u16 tag = bpf_ctx->ctx.tag;
+
+	printk(KERN_INFO "%s called\n", __func__);
+	rq = blk_mq_tag_to_rq(bpf_ctx->ub->tag_set.tags[q_id], tag);
+	data = blk_mq_rq_to_pdu(rq);
+	kbuf = data->kbuf;
+	io_uring_submit_sqe(fd, sqe, sqe_len, kbuf);
 	return 0;
 }
 
-BPF_CALL_4(bpf_ublk_read_req, struct request *, rq, u32, offset,
+BPF_CALL_4(bpf_ublk_read_req, struct ublk_io_bpf_ctx *, bpf_ctx, u32, offset,
 	   void *, to, u32, len)
 {
-	trace_printk("lege: ublk & epbf\n");
+	trace_printk("%s called\n", __func__);
 	return 0;
 }
 
@@ -256,7 +274,19 @@ static bool ublk_bpf_is_valid_access(int off, int size,
 		return false;
 	}
 
-	return true;
+	switch (off) {
+	case offsetof(struct ublk_bpf_ctx, q_id):
+                return size == sizeof_field(struct ublk_bpf_ctx, q_id);
+        case offsetof(struct ublk_bpf_ctx, tag):
+                return size == sizeof_field(struct ublk_bpf_ctx, tag);
+        case offsetof(struct ublk_bpf_ctx, op):
+                return size == sizeof_field(struct ublk_bpf_ctx, op);
+        case offsetof(struct ublk_bpf_ctx, nr_sectors):
+                return size == sizeof_field(struct ublk_bpf_ctx, nr_sectors);
+        case offsetof(struct ublk_bpf_ctx, start_sector):
+                return size == sizeof_field(struct ublk_bpf_ctx, start_sector);
+        }
+	return false;
 }
 
 const struct bpf_prog_ops bpf_ublk_prog_ops = {};
@@ -916,64 +946,109 @@ static void ublk_queue_cmd(struct ublk_queue *ubq, struct request *rq)
 	}
 }
 
-struct ublk_bpf_io_redirect_ctx {
-	struct ublk_device *ub;
-	struct callback_head work;
-};
-
-static void ublk_bpf_io_redirect_fn(struct callback_head *work)
+static void ublk_bpf_io_submit_fn(struct callback_head *work)
 {
-	struct ublk_bpf_io_redirect_ctx *ctx = container_of(work,
-			struct ublk_bpf_io_redirect_ctx, work);
-	struct ublk_device *ub = ctx->ub;
+	struct ublk_io_bpf_ctx *bpf_ctx = container_of(work,
+			struct ublk_io_bpf_ctx, work);
 	u32 ret;
-	struct ublk_bpf_ctx ublk_ctx;
-	ublk_ctx.t_val = 88888888;
 
-	printk(KERN_ERR "%s %d\n", __func__, __LINE__);
-	WARN_ON_ONCE(!ub->bpf_io_redirect_prog);
-	if (ub->bpf_io_redirect_prog) {
+	if (bpf_ctx->ub->io_submit_prog) {
                 rcu_read_lock();
-                ret = bpf_prog_run_pin_on_cpu(ub->bpf_io_redirect_prog, &ublk_ctx);
+                ret = bpf_prog_run_pin_on_cpu(bpf_ctx->ub->io_submit_prog, &bpf_ctx);
                 rcu_read_unlock();
 		printk(KERN_ERR "%s %d call func\n", __func__, __LINE__);
 	}
-
-	kfree(ctx);
+	kfree(bpf_ctx);
 }
 
-static inline void ublk_run_bpf_prog(struct ublk_queue *ubq)
+static int ublk_init_uring_kbuf(struct request *rq)
 {
-	struct ublk_device *ub = ubq->dev;
-	struct bpf_prog *prog = ub->prog;
-	struct ublk_bpf_ctx ublk_ctx;
+	struct bio_vec *bvec;
+	struct req_iterator rq_iter;
+	struct bio_vec tmp;
+	int nr_bvec = 0;
+	struct io_mapped_kbuf *kbuf;
+	struct ublk_rq_data *data = blk_mq_rq_to_pdu(rq);
+
+	/* Drop previous allocation */
+	if (data->kbuf) {
+		kfree(data->kbuf->bvec);
+		kfree(data->kbuf);
+		data->kbuf = NULL;
+	}
+
+	kbuf = kmalloc(sizeof(struct io_mapped_kbuf), GFP_NOIO);
+	if (!kbuf)
+		return -EIO;
+
+	rq_for_each_bvec(tmp, rq, rq_iter)
+		nr_bvec++;
+
+	bvec = kmalloc_array(nr_bvec, sizeof(struct bio_vec), GFP_NOIO);
+	if (!bvec) {
+		kfree(kbuf);
+		return -EIO;
+	}
+	kbuf->bvec = bvec;
+	rq_for_each_bvec(tmp, rq, rq_iter) {
+		*bvec = tmp;
+		bvec++;
+	}
+
+	kbuf->count = blk_rq_bytes(rq);
+	kbuf->nr_bvecs = nr_bvec;
+	data->kbuf = kbuf;
+
+	printk(KERN_ERR "%s rq:%px\n", __func__, rq);
+	trace_printk("lege: %s succeeds\n", __func__);
+	return 0;
+}
+
+static int ublk_run_bpf_prog(struct ublk_queue *ubq, struct request *rq)
+{
+	int err;
 	u32 ret;
+	struct ublk_device *ub = ubq->dev;
+	struct bpf_prog *prog = ub->io_prep_prog;
+	struct ublk_io_bpf_ctx *bpf_ctx;
 
 	if (!prog)
-		return;
+		return 0;
 
+	bpf_ctx = kmalloc(sizeof(struct ublk_io_bpf_ctx), GFP_NOIO);
+	if (!bpf_ctx)
+		return -EIO;
+
+	err = ublk_init_uring_kbuf(rq);
+	if (err < 0) {
+		kfree(bpf_ctx);
+		printk(KERN_ERR "ublk_init_uring_kbuf failed\n");
+		return -EIO;
+	}
 	printk(KERN_ERR "run bpf prog\n");
-	ublk_ctx.t_val = 666666;
+	bpf_ctx->ub = ub;
+	bpf_ctx->ctx.q_id = ubq->q_id;
+	bpf_ctx->ctx.tag = rq->tag;
+	bpf_ctx->ctx.op = req_op(rq);
+	bpf_ctx->ctx.nr_sectors = blk_rq_sectors(rq);
+	bpf_ctx->ctx.start_sector = blk_rq_pos(rq);
 	if (!prog->aux->sleepable) {
-                rcu_read_lock();
-                ret = bpf_prog_run_pin_on_cpu(prog, &ublk_ctx);
-                rcu_read_unlock();
-        } else {
-                ret = bpf_prog_run_pin_on_cpu(prog, &ublk_ctx);
-        }
+		rcu_read_lock();
+		ret = bpf_prog_run_pin_on_cpu(prog, &bpf_ctx);
+		rcu_read_unlock();
+	} else {
+		ret = bpf_prog_run_pin_on_cpu(prog, &bpf_ctx);
+	}
 
 	if (1) {
-		struct ublk_bpf_io_redirect_ctx *ctx;
-
-		printk(KERN_ERR "lege xxx ret: %u\n", ret);
-		ctx = kmalloc(sizeof(struct ublk_bpf_io_redirect_ctx), GFP_KERNEL);
-		ctx->ub = ub;
-		init_task_work(&ctx->work, ublk_bpf_io_redirect_fn);
-		if (task_work_add(ubq->ubq_daemon, &ctx->work, TWA_SIGNAL_NO_IPI))
-			kfree(ctx);
+		printk(KERN_ERR "lege io_prep_prog ret: %u\n", ret);
+		init_task_work(&bpf_ctx->work, ublk_bpf_io_submit_fn);
+		if (task_work_add(ubq->ubq_daemon, &bpf_ctx->work, TWA_SIGNAL_NO_IPI))
+			kfree(bpf_ctx);
 	} else {
 		printk(KERN_ERR "lege ret: %u\n", ret);
 	}
+	return 0;
 }
 
 static blk_status_t ublk_queue_rq(struct blk_mq_hw_ctx *hctx,
@@ -984,7 +1059,7 @@ static blk_status_t ublk_queue_rq(struct blk_mq_hw_ctx *hctx,
 	blk_status_t res;
 
 	/* Currently just for test. */
-	ublk_run_bpf_prog(ubq);
+	ublk_run_bpf_prog(ubq, rq);
 
 	/* fill iod to slot in io cmd buffer */
 	res = ublk_setup_iod(ubq, rq);
@@ -1031,6 +1106,7 @@ static int ublk_init_rq(struct blk_mq_tag_set *set, struct request *req,
 	struct ublk_rq_data *data = blk_mq_rq_to_pdu(req);
 
 	init_task_work(&data->work, ublk_rq_task_work_fn);
+	data->kbuf = NULL;
 	return 0;
 }
 
@@ -2147,7 +2223,7 @@ static int ublk_ctrl_reg_bpf_prog(struct io_uring_cmd *cmd)
 		printk(KERN_ERR "%d %d %llu\n", __LINE__, ret, header->data[0]);
 		goto out_unlock;
 	}
-	ub->prog = prog;
+	ub->io_prep_prog = prog;
 
 	prog = bpf_prog_get_type(header->data[1], BPF_PROG_TYPE_UBLK);
  	if (IS_ERR(prog)) {
@@ -2155,7 +2231,7 @@ static int ublk_ctrl_reg_bpf_prog(struct io_uring_cmd *cmd)
 		printk(KERN_ERR "%d %d %llu\n", __LINE__, ret, header->data[1]);
 		goto out_unlock;
 	}
-	ub->bpf_io_redirect_prog = prog;
+	ub->io_submit_prog = prog;
 
 out_unlock:
 	mutex_unlock(&ub->mutex);
@@ -2173,8 +2249,10 @@ static int ublk_ctrl_unreg_bpf_prog(struct io_uring_cmd *cmd)
 		return -EINVAL;
 
 	mutex_lock(&ub->mutex);
-	bpf_prog_put(ub->prog);
-	ub->prog = NULL;
+	bpf_prog_put(ub->io_prep_prog);
+	bpf_prog_put(ub->io_submit_prog);
+	ub->io_prep_prog = NULL;
+	ub->io_submit_prog = NULL;
 	mutex_unlock(&ub->mutex);
 	ublk_put_device(ub);
 	return 0;

@@ -233,9 +233,11 @@ struct ublk_params {
 };
 
 struct ublk_bpf_ctx {
-	struct request *rq;
-	int fd;
-	__u32 t_val;
+	__u16	q_id;
+	__u16	tag;
+	__u8	op;
+	__u32	nr_sectors;
+	__u64	start_sector;
 };
 
 #endif
