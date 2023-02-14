@@ -4,6 +4,7 @@
 
 #include <linux/sched.h>
 #include <linux/xarray.h>
+#include <linux/uio.h>
 #include <uapi/linux/io_uring.h>
 
 enum io_uring_cmd_flags {
@@ -36,6 +37,10 @@ struct io_uring_cmd {
 	u8		pdu[32]; /* available inline for free use */
 };
 
+struct io_fixed_iter {
+	struct iov_iter iter;
+};
+
 #if defined(CONFIG_IO_URING)
 int io_uring_cmd_import_fixed(u64 ubuf, unsigned long len, int rw,
 			      struct iov_iter *iter, void *ioucmd);
@@ -65,6 +70,8 @@ static inline void io_uring_free(struct task_struct *tsk)
 	if (tsk->io_uring)
 		__io_uring_free(tsk);
 }
+int io_uring_submit_sqe(int fd, const struct io_uring_sqe *sqe, u32 sqe_len,
+			const struct io_fixed_iter *iter);
 #else
 static inline int io_uring_cmd_import_fixed(u64 ubuf, unsigned long len, int rw,
 			      struct iov_iter *iter, void *ioucmd)
@@ -95,6 +102,11 @@ static inline void io_uring_free(struct task_struct *tsk)
 static inline const char *io_uring_get_opcode(u8 opcode)
 {
 	return "";
+}
+int io_uring_submit_sqe(int fd, const struct io_uring_sqe *sqe, u32 sqe_len,
+			const struct io_fixed_iter *iter)
+{
+	return 0;
 }
 #endif
 

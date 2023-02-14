@@ -2232,7 +2232,8 @@ static __cold int io_submit_fail_init(const struct io_uring_sqe *sqe,
 }
 
 static inline int io_submit_sqe(struct io_ring_ctx *ctx, struct io_kiocb *req,
-			 const struct io_uring_sqe *sqe)
+			 const struct io_uring_sqe *sqe,
+			 const struct io_fixed_iter *iter)
 	__must_hold(&ctx->uring_lock)
 {
 	struct io_submit_link *link = &ctx->submit_state.link;
@@ -2241,6 +2242,10 @@ static inline int io_submit_sqe(struct io_ring_ctx *ctx, struct io_kiocb *req,
 	ret = io_init_req(ctx, req, sqe);
 	if (unlikely(ret))
 		return io_submit_fail_init(sqe, req, ret);
+	if (unlikely(iter)) {
+		req->iter = iter;
+		req->flags |= REQ_F_ITER;
+	}
 
 	/* don't need @sqe from now on */
 	trace_io_uring_submit_sqe(req, true);
@@ -2392,7 +2397,7 @@ int io_submit_sqes(struct io_ring_ctx *ctx, unsigned int nr)
 		 * Continue submitting even for sqe failure if the
 		 * ring was setup with IORING_SETUP_SUBMIT_ALL
 		 */
-		if (unlikely(io_submit_sqe(ctx, req, sqe)) &&
+		if (unlikely(io_submit_sqe(ctx, req, sqe, NULL)) &&
 		    !(ctx->flags & IORING_SETUP_SUBMIT_ALL)) {
 			left--;
 			break;
@@ -3271,6 +3276,54 @@ static int io_get_ext_arg(unsigned flags, const void __user *argp, size_t *argsz
 	*ts = u64_to_user_ptr(arg.ts);
 	return 0;
 }
+
+int io_uring_submit_sqe(int fd, const struct io_uring_sqe *sqe, u32 sqe_len,
+			const struct io_fixed_iter *iter)
+{
+	struct io_kiocb *req;
+	struct fd f;
+	int ret;
+	struct io_ring_ctx *ctx;
+
+	f = fdget(fd);
+	if (unlikely(!f.file))
+		return -EBADF;
+
+	ret = -EOPNOTSUPP;
+	if (unlikely(!io_is_uring_fops(f.file))) {
+		ret = -EBADF;
+		goto out;
+	}
+	ctx = f.file->private_data;
+
+	mutex_lock(&ctx->uring_lock);
+	if (unlikely(!io_alloc_req_refill(ctx)))
+		goto out;
+	req = io_alloc_req(ctx);
+	if (unlikely(!req)) {
+		ret = -ENOMEM;
+		goto out;
+	}
+	if (!percpu_ref_tryget_many(&ctx->refs, 1)) {
+		kmem_cache_free(req_cachep, req);
+		ret = -EAGAIN;
+		goto out;
+	}
+	percpu_counter_add(&current->io_uring->inflight, 1);
+	refcount_add(1, &current->usage);
+
+	/* returns number of submitted SQEs or an error */
+	ret = !io_submit_sqe(ctx, req, sqe, iter);
+	mutex_unlock(&ctx->uring_lock);
+	fdput(f);
+	return ret;
+
+out:
+	mutex_unlock(&ctx->uring_lock);
+	fdput(f);
+	return ret;
+}
+EXPORT_SYMBOL(io_uring_submit_sqe);
 
 SYSCALL_DEFINE6(io_uring_enter, unsigned int, fd, u32, to_submit,
 		u32, min_complete, u32, flags, const void __user *, argp,
@@ -4270,7 +4323,7 @@ static int __init io_uring_init(void)
 	BUILD_BUG_ON(SQE_COMMON_FLAGS >= (1 << 8));
 	BUILD_BUG_ON((SQE_VALID_FLAGS | SQE_COMMON_FLAGS) != SQE_VALID_FLAGS);
 
-	BUILD_BUG_ON(__REQ_F_LAST_BIT > 8 * sizeof(int));
+	BUILD_BUG_ON(__REQ_F_LAST_BIT > 8 * sizeof(u64));
 
 	BUILD_BUG_ON(sizeof(atomic_t) != sizeof(u32));
 

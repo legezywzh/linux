@@ -1380,3 +1380,21 @@ int io_import_fixed(int ddir, struct iov_iter *iter,
 
 	return 0;
 }
+
+int io_import_iter(int ddir, struct iov_iter *iter,
+		   const struct io_fixed_iter *fixed_iter,
+		   u64 offset, size_t len)
+{
+	size_t count;
+
+	if (WARN_ON_ONCE(!fixed_iter))
+		return -EFAULT;
+
+	count = iov_iter_count(&(fixed_iter->iter));
+	if (offset >= count || (offset + len) > count)
+		return -EFAULT;
+
+	*iter = fixed_iter->iter;
+	return 0;
+}
+

@@ -69,6 +69,10 @@ int io_import_fixed(int ddir, struct iov_iter *iter,
 			   struct io_mapped_ubuf *imu,
 			   u64 buf_addr, size_t len);
 
+int io_import_iter(int ddir, struct iov_iter *iter,
+		   const struct io_fixed_iter *fixed_iter,
+		   u64 buf_addr, size_t len);
+
 void __io_sqe_buffers_unregister(struct io_ring_ctx *ctx);
 int io_sqe_buffers_unregister(struct io_ring_ctx *ctx);
 int io_sqe_buffers_register(struct io_ring_ctx *ctx, void __user *arg,
