@@ -1380,3 +1380,18 @@ int io_import_fixed(int ddir, struct iov_iter *iter,
 
 	return 0;
 }
+
+int io_import_fixed_kbuf(int ddir, struct iov_iter *iter,
+			 struct io_mapped_kbuf *kbuf,
+			u64 offset, size_t len)
+{
+	if (WARN_ON_ONCE(!kbuf))
+		return -EFAULT;
+	if (offset >= kbuf->count)
+		return -EFAULT;
+
+	iov_iter_bvec(iter, ddir, kbuf->bvec, kbuf->nr_bvecs, offset + len);
+	iov_iter_advance(iter, offset);
+	return 0;
+}
+

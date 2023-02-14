@@ -378,6 +378,13 @@ static struct iovec *__io_import_iovec(int ddir, struct io_kiocb *req,
 		return NULL;
 	}
 
+	if (unlikely(req->flags & REQ_F_KBUF)) {
+		ret = io_import_fixed_kbuf(ddir, iter, req->imk, rw->addr, rw->len);
+		if (ret)
+			return ERR_PTR(ret);
+		return NULL;
+	}
+
 	buf = u64_to_user_ptr(rw->addr);
 	sqe_len = rw->len;
 
