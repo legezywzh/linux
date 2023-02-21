@@ -17,6 +17,8 @@
 #define	UBLK_CMD_STOP_DEV	0x07
 #define	UBLK_CMD_SET_PARAMS	0x08
 #define	UBLK_CMD_GET_PARAMS	0x09
+#define UBLK_CMD_REG_BPF_PROG		0x0a
+#define UBLK_CMD_UNREG_BPF_PROG		0x0b
 #define	UBLK_CMD_START_USER_RECOVERY	0x10
 #define	UBLK_CMD_END_USER_RECOVERY	0x11
 /*
@@ -228,6 +230,22 @@ struct ublk_params {
 
 	struct ublk_param_basic		basic;
 	struct ublk_param_discard	discard;
+};
+
+struct ublk_bpf_ctx {
+	__u32   t_val;
+	__u16   q_id;
+	__u16   tag;
+	__u8    op;
+	__u32   nr_sectors;
+	__u64   start_sector;
+};
+
+enum {
+	UBLK_BPF_IO_ABORTED = 0,
+	UBLK_BPF_IO_DROP,
+	UBLK_BPF_IO_PASS,
+	UBLK_BPF_IO_REDIRECT,
 };
 
 #endif
