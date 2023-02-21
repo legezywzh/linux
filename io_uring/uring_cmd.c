@@ -16,7 +16,11 @@ static void io_uring_cmd_work(struct io_kiocb *req, bool *locked)
 {
 	struct io_uring_cmd *ioucmd = io_kiocb_to_cmd(req, struct io_uring_cmd);
 
+	if ((req->flags & IORING_URING_CMD_UNLOCK) && *locked)
+		mutex_unlock(&(req->ctx->uring_lock));
 	ioucmd->task_work_cb(ioucmd);
+	if ((req->flags & IORING_URING_CMD_UNLOCK) && *locked)
+		mutex_lock(&(req->ctx->uring_lock));
 }
 
 void io_uring_cmd_complete_in_task(struct io_uring_cmd *ioucmd,
